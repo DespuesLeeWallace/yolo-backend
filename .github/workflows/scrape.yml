@@ -3,7 +3,7 @@ name: Scrape Events
 on:
   # Run every 6 hours
   schedule:
-    - cron: '0 */6 * * *'  # At minute 0 past every 6th hour
+    - cron: '23 3 * * *' # 3:23 AM UTC daily (random minute/hour)
   
   # Allow manual trigger
   workflow_dispatch:
@@ -31,7 +31,10 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           SONGKICK_API_KEY: ${{ secrets.SONGKICK_API_KEY }}
-        run: uv run python main.py
+        run: |
+          # Add random delay (0-15 minutes) to avoid predictable patterns
+          sleep $((RANDOM % 900))
+          uv run python main.py
       
       - name: Notify on failure
         if: failure()
