@@ -30,7 +30,21 @@ class ResidentAdvisorScraper:
             'Connection': 'keep-alive',
             'Upgrade-Insecure-Requests': '1',
         })
-    
+
+        # self.session.headers.update({
+        #     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        #     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        #     'Accept-Language': 'en-US,en;q=0.9,es;q=0.8',
+        #     'Accept-Encoding': 'gzip, deflate, br',
+        #     'DNT': '1',
+        #     'Connection': 'keep-alive',
+        #     'Upgrade-Insecure-Requests': '1',
+        #     'Sec-Fetch-Dest': 'document',
+        #     'Sec-Fetch-Mode': 'navigate',
+        #     'Sec-Fetch-Site': 'none',
+        #     'Cache-Control': 'max-age=0',
+        # })
+        #
     def scrape_city(self, city: str, country: str = "ES") -> List[Dict]:
         """
         Scrape events for a specific city
@@ -46,14 +60,15 @@ class ResidentAdvisorScraper:
         
         # RA uses city URLs like: /events/es/madrid
         url = f"{self.BASE_URL}/events/{country.lower()}/{city.lower()}"
-        
+        print(f"  Scraping URL: {url}")
         try:
             # Add delay to be respectful
             time.sleep(random.uniform(1, 2))
-            
+
             response = self.session.get(url, timeout=15)
             print(f"Status code: {response.status_code}")
             print(f"Headers: {response.headers}\n")
+            response.raise_for_status()
             try:
                 # Try to use response.text (should work if brotli is installed)
                 html = response.text
@@ -63,8 +78,7 @@ class ResidentAdvisorScraper:
                 print(f"Error decoding response.text: {e}, trying manual brotli decode...")
                 html = brotli.decompress(response.content).decode('utf-8')
                 print(f"First 500 chars of manually decoded html:\n{html[:500]}\n")
-            response.raise_for_status()
-            
+
             soup = BeautifulSoup(html, 'html.parser')
 
             # Find event listings
@@ -77,7 +91,7 @@ class ResidentAdvisorScraper:
             if not event_items:
                 print(f"⚠️  No events found for {city} (selector might need updating)")
                 return events
-            
+
             for item in event_items[:50]:  # Limit to 50 events per city
                 try:
                     event = self._parse_event(item, city, country)
@@ -86,7 +100,7 @@ class ResidentAdvisorScraper:
                 except Exception as e:
                     print(f"  Error parsing event: {e}")
                     continue
-            
+
             print(f"  Found {len(events)} events")
             
         except requests.RequestException as e:
@@ -96,9 +110,24 @@ class ResidentAdvisorScraper:
         
         return events
     
-    def _parse_event(self, item, city: str, country: str) -> Dict:
+    def _parse_event(self, item, city: str, country: str) -> Dict | None:
         """Parse a single event from HTML"""
-        
+
+        # date:
+        date_elem = item.find('span', attrs={'class': 'Text-sc-wks9sf-0 dhcUaC'})
+        event_date = None
+        try:
+            event_date = datetime.strptime(date_elem.text.strip(), '%a, %d %b').replace(year=datetime.now().year).date() if date_elem else None
+        except Exception:
+            pass
+
+        # TODO: If no structured date, try to parse from text
+        if not event_date:
+            date_text = item.get_text()
+            # Look for patterns like "15 Dec" or "December 15"
+            # This is a simplified parser, can be improved
+            pass
+
         # Extract title
         title_elem = item.find(['h3', 'h4', 'h2'])
         if not title_elem:
@@ -110,27 +139,13 @@ class ResidentAdvisorScraper:
             return None
         
         # Extract venue
-        venue_elem = item.find(string=re.compile(r'venue|club|sala', re.I))
-        if not venue_elem:
-            venue_elem = item.find(class_=re.compile(r'venue|location', re.I))
+        venue_elem = item.find('a', attrs={'data-pw-test-id': 'event-venue-link'})
+        venue_href = venue_elem.get('href') if venue_elem else None
+        venue_url = None
+        if venue_href:
+            venue_url = f"{self.BASE_URL}{venue_href}" if venue_href.startswith('/') else venue_href
         venue = venue_elem.get_text(strip=True) if venue_elem else None
-        
-        # Extract date
-        date_elem = item.find('time')
-        event_date = None
-        if date_elem and date_elem.get('datetime'):
-            try:
-                date_str = date_elem.get('datetime')
-                event_date = datetime.fromisoformat(date_str.replace('Z', '+00:00')).date()
-            except:
-                pass
-        
-        # If no structured date, try to parse from text
-        if not event_date:
-            date_text = item.get_text()
-            # Look for patterns like "15 Dec" or "December 15"
-            # This is a simplified parser, can be improved
-            pass
+
         
         # Extract link and ID
         link_elem = item.find('a', href=re.compile(r'/events/'))
@@ -189,6 +204,7 @@ class ResidentAdvisorScraper:
             'country': country,
             'venue_name': venue,
             'venue_address': None,
+            'venue_url': venue_url if venue_elem else None,
             'event_date': event_date,
             'start_time': "23:00:00",  # Default club time
             'duration_hours': 5.0,
