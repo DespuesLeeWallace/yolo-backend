@@ -1,213 +1,219 @@
 """
-Resident Advisor Scraper
+Database Manager for YOLO Scrapers
 
-Scrapes electronic music events from Resident Advisor (ra.co)
-Best coverage for nightlife/club events across Europe
+Handles all database operations including:
+- Connection management
+- Saving events (with duplicate detection)
+- Logging scraper runs
 """
 
-import requests
-from bs4 import BeautifulSoup
+import os
 from datetime import datetime
-from typing import List, Dict
-import re
-import time
-import random
+from typing import List, Dict, Tuple
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.exc import IntegrityError
 
-class ResidentAdvisorScraper:
-    """Scraper for Resident Advisor events"""
-    
-    BASE_URL = "https://ra.co"
-    
+class DatabaseManager:
+    """Manages database connections and operations"""
+
     def __init__(self):
-        self.session = requests.Session()
-        self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
-        })
-    
-    def scrape_city(self, city: str, country: str = "ES") -> List[Dict]:
+        """Initialize database connection"""
+        # database_url = os.getenv('DATABASE_URL')
+        #
+        # if not database_url:
+        #     raise ValueError("DATABASE_URL environment variable not set")
+        #
+        # # Create engine
+        # self.engine = create_engine(
+        #     database_url,
+        #     pool_pre_ping=True,  # Verify connections before using
+        #     echo=False  # Set to True for SQL debugging
+        # )
+        #
+        # # Create session factory
+        # self.SessionLocal = sessionmaker(
+        #     autocommit=False,
+        #     autoflush=False,
+        #     bind=self.engine
+        # )
+        pass
+
+    def get_session(self) -> Session:
+        """Get a new database session"""
+        return self.SessionLocal()
+
+    def save_events(self, events: List[Dict]) -> Tuple[int, int]:
         """
-        Scrape events for a specific city
-        
+        Save events to database with duplicate detection
+
         Args:
-            city: City name (e.g., 'madrid', 'barcelona')
-            country: Country code (e.g., 'ES' for Spain)
-        
+            events: List of event dictionaries
+
         Returns:
-            List of event dictionaries
+            Tuple of (new_count, updated_count)
         """
-        events = []
-        
-        # RA uses city URLs like: /events/es/madrid
-        url = f"{self.BASE_URL}/events/{country.lower()}/{city.lower()}"
-        
+        session = self.get_session()
+        new_count = 0
+        updated_count = 0
+
         try:
-            # Add delay to be respectful
-            time.sleep(random.uniform(1, 2))
-            
-            response = self.session.get(url, timeout=15)
-            response.raise_for_status()
-            
-            soup = BeautifulSoup(response.content, 'html.parser')
-            
-            # Find event listings
-            # Note: RA's exact selectors may change, adjust as needed
-            event_items = soup.find_all('li', class_=lambda x: x and 'event' in x.lower() if x else False)
-            
-            # Fallback: try different selectors
-            if not event_items:
-                event_items = soup.find_all('article')
-            
-            if not event_items:
-                print(f"⚠️  No events found for {city} (selector might need updating)")
-                return events
-            
-            for item in event_items[:50]:  # Limit to 50 events per city
+            for event_data in events:
                 try:
-                    event = self._parse_event(item, city, country)
-                    if event and event.get('title'):
-                        events.append(event)
-                except Exception as e:
-                    print(f"  Error parsing event: {e}")
+                    # Check if event exists by source_id
+                    if event_data.get('source_id'):
+                        result = session.execute(
+                            text("SELECT id FROM events WHERE source_id = :source_id"),
+                            {"source_id": event_data['source_id']}
+                        ).fetchone()
+
+                        if result:
+                            # Update existing event
+                            event_id = result[0]
+                            update_query = text("""
+                                UPDATE events SET
+                                    title = :title,
+                                    description = :description,
+                                    category = :category,
+                                    tags = :tags,
+                                    city = :city,
+                                    country = :country,
+                                    venue_name = :venue_name,
+                                    event_date = :event_date,
+                                    start_time = :start_time,
+                                    duration_hours = :duration_hours,
+                                    price_min = :price_min,
+                                    price_max = :price_max,
+                                    currency = :currency,
+                                    image_url = :image_url,
+                                    booking_url = :booking_url,
+                                    vibe = :vibe,
+                                    updated_at = :updated_at,
+                                    age_min = :age_min
+                                WHERE id = :id
+                            """)
+
+                            session.execute(update_query, {
+                                **event_data,
+                                'id': event_id,
+                                'updated_at': datetime.now()
+                            })
+                            updated_count += 1
+                        else:
+                            # Insert new event
+                            self._insert_event(session, event_data)
+                            new_count += 1
+                    else:
+                        # No source_id, always insert (might create duplicates)
+                        self._insert_event(session, event_data)
+                        new_count += 1
+
+                except IntegrityError as e:
+                    # Duplicate source_id, skip
+                    session.rollback()
                     continue
-            
-            print(f"  Found {len(events)} events")
-            
-        except requests.RequestException as e:
-            print(f"  ✗ Network error: {e}")
+                except Exception as e:
+                    print(f"Error saving event '{event_data.get('title', 'Unknown')}': {e}")
+                    session.rollback()
+                    continue
+
+            session.commit()
+
         except Exception as e:
-            print(f"  ✗ Unexpected error: {e}")
-        
-        return events
-    
-    def _parse_event(self, item, city: str, country: str) -> Dict:
-        """Parse a single event from HTML"""
-        
-        # Extract title
-        title_elem = item.find(['h3', 'h4', 'h2'])
-        if not title_elem:
-            # Try finding any link with text
-            title_elem = item.find('a', string=True)
-        
-        title = title_elem.get_text(strip=True) if title_elem else None
-        if not title or len(title) < 3:
-            return None
-        
-        # Extract venue
-        venue_elem = item.find(string=re.compile(r'venue|club|sala', re.I))
-        if not venue_elem:
-            venue_elem = item.find(class_=re.compile(r'venue|location', re.I))
-        venue = venue_elem.get_text(strip=True) if venue_elem else None
-        
-        # Extract date
-        date_elem = item.find('time')
-        event_date = None
-        if date_elem and date_elem.get('datetime'):
-            try:
-                date_str = date_elem.get('datetime')
-                event_date = datetime.fromisoformat(date_str.replace('Z', '+00:00')).date()
-            except:
-                pass
-        
-        # If no structured date, try to parse from text
-        if not event_date:
-            date_text = item.get_text()
-            # Look for patterns like "15 Dec" or "December 15"
-            # This is a simplified parser, can be improved
-            pass
-        
-        # Extract link and ID
-        link_elem = item.find('a', href=re.compile(r'/events/'))
-        event_url = None
-        source_id = None
-        if link_elem:
-            href = link_elem.get('href')
-            if href:
-                event_url = f"{self.BASE_URL}{href}" if href.startswith('/') else href
-                # Extract ID from URL like /events/12345-event-name
-                match = re.search(r'/events/(\d+)', href)
-                if match:
-                    source_id = f"ra_{match.group(1)}"
-        
-        # Extract price if available
-        price_min = None
-        price_text = item.find(string=re.compile(r'€|EUR|free', re.I))
-        if price_text:
-            text = price_text.lower()
-            if 'free' in text:
-                price_min = 0.0
-            else:
-                price_match = re.search(r'€?(\d+)', text)
-                if price_match:
-                    price_min = float(price_match.group(1))
-        
-        # Default if no price found
-        if price_min is None:
-            price_min = 15.0  # Typical RA event price
-        
-        # Auto-classify and generate vibe
-        category = "party"
-        tags = ["electronic", "nightlife"]
-        vibe = "Electronic music in an underground atmosphere"
-        
-        title_lower = title.lower()
-        if any(word in title_lower for word in ['techno', 'tech house']):
-            vibe = "Dark techno vibes, industrial energy"
-            tags.append("techno")
-        elif any(word in title_lower for word in ['house', 'deep house']):
-            vibe = "House music, uplifting beats"
-            tags.append("house")
-        elif any(word in title_lower for word in ['drum', 'bass', 'dnb', 'd&b']):
-            vibe = "High-energy drum and bass"
-            tags.append("drum-and-bass")
-        elif any(word in title_lower for word in ['ambient', 'experimental']):
-            vibe = "Experimental sounds, mind-expanding"
-            tags.append("experimental")
-        
-        return {
-            'title': title,
-            'description': None,
-            'category': category,
-            'tags': tags,
-            'city': city.capitalize(),
-            'country': country,
-            'venue_name': venue,
-            'venue_address': None,
-            'event_date': event_date,
-            'start_time': "23:00:00",  # Default club time
-            'duration_hours': 5.0,
-            'price_min': price_min,
-            'price_max': None,
-            'currency': 'EUR',
-            'image_url': None,
-            'booking_url': event_url,
-            'source': 'resident_advisor',
-            'source_id': source_id,
-            'vibe': vibe,
-            'age_min': 18
-        }
+            print(f"Database error: {e}")
+            session.rollback()
+            raise
+        finally:
+            session.close()
 
+        return new_count, updated_count
 
-def test_scraper():
-    """Test the scraper locally"""
-    print("Testing Resident Advisor scraper...\n")
-    
-    scraper = ResidentAdvisorScraper()
-    events = scraper.scrape_city("madrid", "ES")
-    
-    print(f"\n{'='*60}")
-    print(f"Found {len(events)} events in Madrid")
-    print(f"{'='*60}\n")
-    
-    for i, event in enumerate(events[:3], 1):
-        print(f"Event {i}:")
-        print(f"  Title: {event['title']}")
-        print(f"  Venue: {event['venue_name']}")
-        print(f"  Date: {event['event_date']}")
-        print(f"  Price: €{event['price_min']}")
-        print(f"  Category: {event['category']}")
-        print(f"  Tags: {', '.join(event['tags'])}")
-        print(f"  Vibe: {event['vibe']}")
-        print()
+    def _insert_event(self, session: Session, event_data: Dict):
+        """Insert a new event into the database"""
+        insert_query = text("""
+            INSERT INTO events (
+                title, description, category, tags, city, country,
+                venue_name, venue_address, event_date, start_time,
+                duration_hours, price_min, price_max, currency,
+                image_url, booking_url, source, source_id, vibe,
+                age_min, is_active, created_at, updated_at
+            ) VALUES (
+                :title, :description, :category, :tags, :city, :country,
+                :venue_name, :venue_address, :event_date, :start_time,
+                :duration_hours, :price_min, :price_max, :currency,
+                :image_url, :booking_url, :source, :source_id, :vibe,
+                :age_min, :is_active, :created_at, :updated_at
+            )
+        """)
 
-if __name__ == "__main__":
-    test_scraper()
+        session.execute(insert_query, {
+            **event_data,
+            'is_active': True,
+            'created_at': datetime.now(),
+            'updated_at': datetime.now()
+        })
+
+    def log_scraper_run(self, scraper_name: str, started_at: datetime,
+                        finished_at: datetime, status: str,
+                        events_found: int = 0, events_new: int = 0,
+                        error_message: str = None):
+        """Log a scraper run to the database"""
+        session = self.get_session()
+
+        try:
+            insert_query = text("""
+                INSERT INTO scraper_runs (
+                    scraper_name, started_at, finished_at, status,
+                    events_found, events_new, error_message, created_at
+                ) VALUES (
+                    :scraper_name, :started_at, :finished_at, :status,
+                    :events_found, :events_new, :error_message, :created_at
+                )
+            """)
+
+            session.execute(insert_query, {
+                'scraper_name': scraper_name,
+                'started_at': started_at,
+                'finished_at': finished_at,
+                'status': status,
+                'events_found': events_found,
+                'events_new': events_new,
+                'error_message': error_message,
+                'created_at': datetime.now()
+            })
+
+            session.commit()
+
+        except Exception as e:
+            print(f"Failed to log scraper run: {e}")
+            session.rollback()
+        finally:
+            session.close()
+
+    def deactivate_old_events(self, days_old: int = 1):
+        """
+        Mark events as inactive if their date has passed
+
+        Args:
+            days_old: Number of days in the past to consider old
+        """
+        session = self.get_session()
+
+        try:
+            update_query = text("""
+                UPDATE events
+                SET is_active = FALSE
+                WHERE event_date < CURRENT_DATE - INTERVAL ':days days'
+                AND is_active = TRUE
+            """)
+
+            result = session.execute(update_query, {'days': days_old})
+            session.commit()
+
+            print(f"Deactivated {result.rowcount} old events")
+
+        except Exception as e:
+            print(f"Failed to deactivate old events: {e}")
+            session.rollback()
+        finally:
+            session.close()

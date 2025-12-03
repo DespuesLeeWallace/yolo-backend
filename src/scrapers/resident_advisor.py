@@ -12,6 +12,7 @@ from typing import List, Dict
 import re
 import time
 import random
+import brotli
 
 class ResidentAdvisorScraper:
     """Scraper for Resident Advisor events"""
@@ -21,7 +22,13 @@ class ResidentAdvisorScraper:
     def __init__(self):
         self.session = requests.Session()
         self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Referer': 'https://www.google.com/',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
         })
     
     def scrape_city(self, city: str, country: str = "ES") -> List[Dict]:
@@ -45,18 +52,28 @@ class ResidentAdvisorScraper:
             time.sleep(random.uniform(1, 2))
             
             response = self.session.get(url, timeout=15)
+            print(f"Status code: {response.status_code}")
+            print(f"Headers: {response.headers}\n")
+            try:
+                # Try to use response.text (should work if brotli is installed)
+                html = response.text
+                print(f"First 500 chars of response.text:\n{html[:500]}\n")
+            except Exception as e:
+                # Fallback: manual brotli decode
+                print(f"Error decoding response.text: {e}, trying manual brotli decode...")
+                html = brotli.decompress(response.content).decode('utf-8')
+                print(f"First 500 chars of manually decoded html:\n{html[:500]}\n")
             response.raise_for_status()
             
-            soup = BeautifulSoup(response.content, 'html.parser')
-            
+            soup = BeautifulSoup(html, 'html.parser')
+
             # Find event listings
             # Note: RA's exact selectors may change, adjust as needed
-            event_items = soup.find_all('li', class_=lambda x: x and 'event' in x.lower() if x else False)
-            
+            event_items = soup.find_all('div', attrs={'data-testid': 'event-upcoming-card'})
             # Fallback: try different selectors
             if not event_items:
                 event_items = soup.find_all('article')
-            
+
             if not event_items:
                 print(f"⚠️  No events found for {city} (selector might need updating)")
                 return events
