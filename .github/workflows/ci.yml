@@ -3,16 +3,8 @@ name: CI
 on:
   push:
     branches: [master, main]
-    paths:
-      - 'yolo-backend/**'
   pull_request:
     branches: [master, main]
-    paths:
-      - 'yolo-backend/**'
-
-defaults:
-  run:
-    working-directory: yolo-backend
 
 jobs:
   lint:

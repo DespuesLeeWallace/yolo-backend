@@ -5,10 +5,6 @@ on:
     - cron: '23 3 * * *'  # 3:23 AM UTC daily
   workflow_dispatch:
 
-defaults:
-  run:
-    working-directory: yolo-backend
-
 permissions:
   issues: write
 
