@@ -9,6 +9,9 @@ defaults:
   run:
     working-directory: yolo-backend
 
+permissions:
+  issues: write
+
 jobs:
   scrape:
     runs-on: ubuntu-latest
