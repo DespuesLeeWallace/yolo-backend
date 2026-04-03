@@ -1,225 +1,302 @@
 """
 Fever Scraper
 
-Scrapes unique experiences, exhibitions, and cultural events from Fever
-Uses their hidden public API
+Scrapes events from Fever (feverup.com) category pages.
+Extracts event URLs from the category page's JSON-LD ItemList,
+then fetches each event page for structured Event data.
 """
 
 import requests
+from bs4 import BeautifulSoup
 from datetime import datetime
 from typing import List, Dict
+import re
+import json
 import time
 import random
 
+
+# Category page URLs per city.
+# Each entry is (category_label, url).
+CITY_CATEGORIES = {
+    'madrid': [
+        ('nightlife', 'https://feverup.com/es/madrid/vida-nocturna-clubs'),
+        ('fabrik', 'https://feverup.com/es/madrid/fabrik'),
+        ('comedy', 'https://feverup.com/es/madrid/monologos'),
+    ],
+}
+
+COUNTRY_CODES = {
+    'madrid': 'ES',
+    'barcelona': 'ES',
+    'lisbon': 'PT',
+    'berlin': 'DE',
+    'amsterdam': 'NL',
+}
+
+
 class FeverScraper:
-    """Scraper for Fever experiences"""
-    
-    # Fever's public API endpoint
-    API_URL = "https://feverup.com/m/api/v2/events"
-    
-    # City IDs (found by inspecting network requests on feverup.com)
-    CITY_IDS = {
-        'Madrid': 10,
-        'Barcelona': 4,
-        'Lisbon': 28,
-        'Berlin': 74,
-        'Amsterdam': 69,
-        'Paris': 2,
-        'London': 1
-    }
-    
+    """Scraper for Fever experiences via HTML + JSON-LD"""
+
     def __init__(self):
         self.session = requests.Session()
         self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-            'Accept': 'application/json'
+            'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
         })
-    
-    def scrape_city(self, city_id: int, city_name: str, limit: int = 30) -> List[Dict]:
+
+    def scrape_city(self, city: str) -> List[Dict]:
         """
-        Scrape Fever events for a city
-        
+        Scrape all configured categories for a city.
+
         Args:
-            city_id: Fever's internal city ID
-            city_name: City name for our database
-            limit: Maximum number of events to fetch
-            
+            city: City name (e.g., 'madrid')
+
         Returns:
             List of event dictionaries
         """
-        events = []
-        
+        city_lower = city.lower()
+        categories = CITY_CATEGORIES.get(city_lower)
+        if not categories:
+            print(f"  No Fever categories configured for {city}")
+            return []
+
+        all_events = []
+        for category_label, url in categories:
+            print(f"  Fetching Fever {category_label} for {city.title()}...")
+            event_urls = self._get_event_urls(url)
+            print(f"    Found {len(event_urls)} event URLs")
+
+            for event_url in event_urls:
+                time.sleep(random.uniform(0.3, 0.8))
+                event = self._fetch_event(event_url, city_lower, category_label)
+                if event:
+                    all_events.append(event)
+
+            print(f"    Parsed {len([e for e in all_events])} events so far")
+
+        print(f"  Total: {len(all_events)} Fever events for {city.title()}")
+        return all_events
+
+    def _get_event_urls(self, category_url: str) -> List[str]:
+        """Extract event URLs from a category page's JSON-LD ItemList."""
         try:
-            # Add delay to be respectful
-            time.sleep(random.uniform(1, 2))
-            
-            params = {
-                'city_id': city_id,
-                'page': 1,
-                'page_size': limit
-            }
-            
-            response = self.session.get(self.API_URL, params=params, timeout=15)
-            response.raise_for_status()
-            
-            data = response.json()
-            raw_events = data.get('data', [])
-            
-            for raw_event in raw_events:
-                try:
-                    event = self._parse_event(raw_event, city_name)
-                    if event and event.get('title'):
-                        events.append(event)
-                except Exception as e:
-                    print(f"    Error parsing event: {e}")
-                    continue
-            
-            print(f"  Found {len(events)} events")
-            
-        except requests.RequestException as e:
-            print(f"  Network error: {e}")
+            r = self.session.get(category_url, timeout=15)
+            r.raise_for_status()
         except Exception as e:
-            print(f"  Unexpected error: {e}")
-        
-        return events
-    
-    def _parse_event(self, raw_event: Dict, city_name: str) -> Dict:
-        """Parse a Fever event into our format"""
-        
-        # Extract basic info
-        event_id = raw_event.get('id')
-        title = raw_event.get('title', 'Unknown Event')
-        description = raw_event.get('description', '')
-        
-        # Extract dates
-        start_date_str = raw_event.get('start_date')
-        end_date_str = raw_event.get('end_date')
-        
-        event_date = None
-        if start_date_str:
+            print(f"    Error fetching category page: {e}")
+            return []
+
+        urls = []
+        # Look for JSON-LD with ItemList
+        for m in re.finditer(
+            r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>',
+            r.text, re.DOTALL
+        ):
             try:
-                event_date = datetime.fromisoformat(start_date_str.replace('Z', '+00:00')).date()
-            except:
+                data = json.loads(m.group(1))
+                if data.get('@type') == 'ItemList':
+                    for item in data.get('itemListElement', []):
+                        url = item.get('url')
+                        if url:
+                            urls.append(url)
+            except (json.JSONDecodeError, AttributeError):
+                continue
+
+        # Fallback: search for ItemList in non-typed scripts
+        if not urls:
+            scripts = re.findall(r'<script[^>]*>(.*?)</script>', r.text, re.DOTALL)
+            for s in scripts:
+                s = s.strip()
+                if s.startswith('{') and 'ItemList' in s:
+                    try:
+                        data = json.loads(s)
+                        if data.get('@type') == 'ItemList':
+                            for item in data.get('itemListElement', []):
+                                url = item.get('url')
+                                if url:
+                                    urls.append(url)
+                    except (json.JSONDecodeError, AttributeError):
+                        continue
+
+        return urls
+
+    def _fetch_event(self, event_url: str, city: str, category_label: str) -> Dict | None:
+        """Fetch an event page and extract structured data from JSON-LD."""
+        try:
+            r = self.session.get(event_url, timeout=15)
+            r.raise_for_status()
+        except Exception as e:
+            print(f"    Error fetching {event_url}: {e}")
+            return None
+
+        event_data = None
+        product_data = None
+
+        for m in re.finditer(
+            r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>',
+            r.text, re.DOTALL
+        ):
+            try:
+                data = json.loads(m.group(1))
+                if data.get('@type') == 'Event':
+                    event_data = data
+                elif data.get('@type') == 'Product':
+                    product_data = data
+            except (json.JSONDecodeError, AttributeError):
+                continue
+
+        if not event_data and not product_data:
+            return None
+
+        return self._parse_jsonld(event_data, product_data, event_url, city, category_label)
+
+    def _parse_jsonld(self, event_data: Dict | None, product_data: Dict | None,
+                      event_url: str, city: str, category_label: str) -> Dict | None:
+        """Parse JSON-LD Event and/or Product data into our standard format."""
+        # Prefer Event data, fall back to Product
+        source = event_data or product_data or {}
+
+        title = source.get('name', '').strip()
+        # Fix double-encoded UTF-8
+        try:
+            title = title.encode('latin-1').decode('utf-8')
+        except (UnicodeDecodeError, UnicodeEncodeError):
+            pass
+
+        if not title or len(title) < 3:
+            return None
+
+        description = source.get('description', '')
+        try:
+            description = description.encode('latin-1').decode('utf-8')
+        except (UnicodeDecodeError, UnicodeEncodeError):
+            pass
+
+        # Dates
+        event_date = None
+        start_time = None
+        if event_data and event_data.get('startDate'):
+            try:
+                dt = datetime.fromisoformat(event_data['startDate'])
+                event_date = dt.date()
+                start_time = dt.strftime('%H:%M:%S')
+            except (ValueError, TypeError):
                 pass
-        
-        # Extract pricing
-        price_info = raw_event.get('price', {})
+
+        # Duration
+        duration_hours = 2.0
+        if event_data and event_data.get('startDate') and event_data.get('endDate'):
+            try:
+                start_dt = datetime.fromisoformat(event_data['startDate'])
+                end_dt = datetime.fromisoformat(event_data['endDate'])
+                diff = (end_dt - start_dt).total_seconds() / 3600
+                if 0 < diff < 24:
+                    duration_hours = round(diff, 1)
+            except (ValueError, TypeError):
+                pass
+
+        # Price — from event offers or product offers
         price_min = None
-        price_max = None
-        
-        if isinstance(price_info, dict):
-            price_min = price_info.get('min')
-            price_max = price_info.get('max')
-        
-        # Default pricing if not available
-        if price_min is None:
-            price_min = 15.0
-        
-        # Extract location
-        location_info = raw_event.get('location', {})
-        venue_name = location_info.get('name')
-        venue_address = location_info.get('address')
-        
-        # Extract images
-        images = raw_event.get('images', [])
-        image_url = images[0] if images else None
-        
-        # Build booking URL
-        slug = raw_event.get('slug', '')
-        booking_url = f"https://feverup.com/m/{slug}" if slug else None
-        
-        # Classify event
-        category, tags, vibe = self._classify_event(title, description)
-        
-        # Get country code
-        country_map = {
-            'madrid': 'ES', 'barcelona': 'ES',
-            'lisbon': 'PT',
-            'berlin': 'DE',
-            'amsterdam': 'NL',
-            'paris': 'FR',
-            'london': 'GB'
-        }
-        country = country_map.get(city_name.lower(), 'EU')
-        
+        offers = (event_data or {}).get('offers', []) or (product_data or {}).get('offers', [])
+        if offers:
+            prices = []
+            for o in offers:
+                p = o.get('price')
+                if p is not None:
+                    try:
+                        prices.append(float(p))
+                    except (ValueError, TypeError):
+                        pass
+            if prices:
+                price_min = min(prices)
+
+        # Location
+        location = (event_data or {}).get('location', {})
+        venue_name = location.get('name')
+        venue_address = None
+        address = location.get('address', {})
+        if isinstance(address, dict):
+            venue_address = address.get('streetAddress') or address.get('addressLocality')
+        elif isinstance(address, str):
+            venue_address = address
+
+        # Image
+        image_url = source.get('image')
+
+        # Extract Fever event ID from URL
+        source_id = None
+        id_match = re.search(r'/m/(\d+)', event_url)
+        if id_match:
+            source_id = f"fever_{id_match.group(1)}"
+
+        country = COUNTRY_CODES.get(city.lower(), 'EU')
+        category, tags, vibe = self._classify(title, description, category_label)
+
         return {
             'title': title,
-            'description': description[:500] if description else None,  # Limit length
+            'description': description[:500] if description else None,
             'category': category,
             'tags': tags,
-            'city': city_name,
+            'city': city.capitalize(),
             'country': country,
             'venue_name': venue_name,
             'venue_address': venue_address,
             'event_date': event_date,
-            'start_time': "19:00:00",  # Default evening time
-            'duration_hours': 2.0,
+            'start_time': start_time or '20:00:00',
+            'duration_hours': duration_hours,
             'price_min': price_min,
-            'price_max': price_max,
+            'price_max': None,
             'currency': 'EUR',
             'image_url': image_url,
-            'booking_url': booking_url,
+            'booking_url': event_url,
             'source': 'fever',
-            'source_id': f"fever_{event_id}",
+            'source_id': source_id,
             'vibe': vibe,
-            'age_min': 12  # Most Fever events are family-friendly
+            'age_min': 18 if category_label == 'nightlife' else 12,
         }
-    
-    def _classify_event(self, title: str, description: str) -> tuple:
-        """
-        Classify event into category, tags, and vibe
-        
-        Returns:
-            (category, tags, vibe)
-        """
+
+    def _classify(self, title: str, description: str, category_label: str) -> tuple:
+        """Classify event based on category label and text content."""
+        if category_label == 'nightlife':
+            return 'party', ['nightlife', 'club'], 'Vibrant nightlife experience'
+        if category_label == 'fabrik':
+            return 'party', ['nightlife', 'club', 'fabrik'], 'Legendary Madrid mega-club experience'
+        if category_label == 'comedy':
+            return 'comedy', ['comedy', 'standup'], 'Live stand-up comedy show'
+
         text = f"{title} {description}".lower()
-        
-        # Culture indicators
-        if any(word in text for word in ['museum', 'exhibition', 'gallery', 'art', 'van gogh', 
-                                          'immersive', 'theatre', 'opera', 'ballet']):
+        if any(w in text for w in ['museum', 'exhibition', 'gallery', 'art', 'immersive']):
             return 'culture', ['art', 'exhibition'], 'Immersive cultural experience'
-        
-        # Adventure indicators
-        if any(word in text for word in ['escape', 'tour', 'adventure', 'experience', 'explore']):
-            return 'adventure', ['experience', 'unique'], 'Unique adventure experience'
-        
-        # Relax indicators
-        if any(word in text for word in ['spa', 'wellness', 'brunch', 'rooftop', 'sunset', 'wine']):
-            return 'relax', ['leisure', 'chill'], 'Relaxing experience'
-        
-        # Party indicators
-        if any(word in text for word in ['party', 'club', 'night', 'dj', 'live music', 'concert']):
+        if any(w in text for w in ['party', 'club', 'night', 'dj']):
             return 'party', ['nightlife', 'music'], 'Vibrant nightlife'
-        
-        # Geeky indicators
-        if any(word in text for word in ['gaming', 'tech', 'science', 'interactive', 'virtual reality']):
-            return 'geeky', ['tech', 'interactive'], 'Interactive tech experience'
-        
-        # Default to culture (most Fever events are cultural)
         return 'culture', ['experience'], 'Curated cultural experience'
 
 
 def test_scraper():
     """Test the scraper locally"""
     print("Testing Fever scraper...\n")
-    
+
     scraper = FeverScraper()
-    events = scraper.scrape_city(10, "Madrid")  # Madrid = city_id 10
-    
+    events = scraper.scrape_city("madrid")
+
     print(f"\n{'='*60}")
     print(f"Found {len(events)} events in Madrid")
     print(f"{'='*60}\n")
-    
-    for i, event in enumerate(events[:3], 1):
+
+    for i, event in enumerate(events[:5], 1):
         print(f"Event {i}:")
         print(f"  Title: {event['title']}")
         print(f"  Venue: {event['venue_name']}")
         print(f"  Date: {event['event_date']}")
-        print(f"  Price: €{event['price_min']}")
+        print(f"  Price: {event['price_min']}")
         print(f"  Category: {event['category']}")
         print(f"  Tags: {', '.join(event['tags'])}")
         print(f"  Vibe: {event['vibe']}")
+        print(f"  URL: {event['booking_url']}")
         print()
+
 
 if __name__ == "__main__":
     test_scraper()

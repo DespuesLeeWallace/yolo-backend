@@ -2,246 +2,269 @@
 Resident Advisor Scraper
 
 Scrapes electronic music events from Resident Advisor (ra.co)
-Best coverage for nightlife/club events across Europe
+Uses their GraphQL API via curl_cffi to bypass DataDome bot protection.
 """
 
-import requests
-from bs4 import BeautifulSoup
-from datetime import datetime
+from curl_cffi import requests
+from datetime import datetime, date
 from typing import List, Dict
 import re
 import time
 import random
-import brotli
+
+
+# RA area IDs (found via GraphQL areas query)
+AREA_IDS = {
+    'madrid': 41,
+    'barcelona': 20,
+    'lisbon': 53,
+    'berlin': 34,
+    'amsterdam': 29,
+}
+
+COUNTRY_CODES = {
+    'madrid': 'ES',
+    'barcelona': 'ES',
+    'lisbon': 'PT',
+    'berlin': 'DE',
+    'amsterdam': 'NL',
+}
+
+GRAPHQL_URL = "https://ra.co/graphql"
+
+EVENT_LISTINGS_QUERY = """
+query GET_EVENT_LISTINGS($filters: FilterInputDtoInput, $pageSize: Int, $page: Int) {
+  eventListings(filters: $filters, pageSize: $pageSize, page: $page, sort: { attending: { priority: 1, order: DESCENDING } }) {
+    data {
+      id
+      event {
+        id
+        title
+        date
+        startTime
+        endTime
+        venue {
+          id
+          name
+          address
+        }
+        images {
+          filename
+        }
+        contentUrl
+        pick {
+          blurb
+        }
+      }
+    }
+    totalResults
+  }
+}
+"""
+
 
 class ResidentAdvisorScraper:
-    """Scraper for Resident Advisor events"""
-    
+    """Scraper for Resident Advisor events using their GraphQL API"""
+
     BASE_URL = "https://ra.co"
-    
+
     def __init__(self):
         self.session = requests.Session()
-        self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Referer': 'https://www.google.com/',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-        })
 
-        self.madrid_headers = {
-            'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-            'Accept-Language': 'en,es-ES;q=0.9,es;q=0.8,da;q=0.7',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-            'sec-ch-ua': '"Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99"',
-            'sec-ch-ua-mobile': '?0',
-            'sec-ch-ua-platform': '"Linux"',
-        }
-
-    def scrape_city(self, city: str, country: str = "ES") -> List[Dict]:
+    def scrape_city(self, city: str, country: str = None, days_ahead: int = 14, page_size: int = 50) -> List[Dict]:
         """
-        Scrape events for a specific city
-        
+        Scrape events for a specific city via RA's GraphQL API.
+
         Args:
             city: City name (e.g., 'madrid', 'barcelona')
-            country: Country code (e.g., 'ES' for Spain)
-        
+            country: Country code — ignored, looked up from city name
+            days_ahead: How many days ahead to fetch
+            page_size: Max events per request (RA caps at ~50)
+
         Returns:
             List of event dictionaries
         """
-        events = []
-        
-        # RA uses city URLs like: /events/es/madrid
-        url = f"{self.BASE_URL}/events/{country.lower()}/{city.lower()}"
-        print(f"  Scraping URL: {url}")
-        try:
-            # Add delay to be respectful
-            time.sleep(random.uniform(1, 2))
+        city_lower = city.lower()
+        area_id = AREA_IDS.get(city_lower)
+        if area_id is None:
+            print(f"  Unknown city: {city}. Known cities: {list(AREA_IDS.keys())}")
+            return []
 
-            if city.lower() == "madrid":
-                response = self.session.get(url, timeout=15, headers=self.madrid_headers)
-            else:
-                response = self.session.get(url, timeout=15)
-            print(f"Status code: {response.status_code}")
-            print(f"Headers: {response.headers}\n")
+        country_code = COUNTRY_CODES[city_lower]
+        today = date.today()
+        end_date = date(today.year, today.month + (1 if today.month < 12 else 0), today.day) if days_ahead > 28 else date.fromordinal(today.toordinal() + days_ahead)
+
+        print(f"  Fetching RA events for {city.title()} (area {area_id}), {today} to {end_date}")
+
+        payload = {
+            'operationName': 'GET_EVENT_LISTINGS',
+            'query': EVENT_LISTINGS_QUERY,
+            'variables': {
+                'filters': {
+                    'areas': {'eq': area_id},
+                    'listingDate': {
+                        'gte': today.isoformat(),
+                        'lte': end_date.isoformat(),
+                    },
+                },
+                'pageSize': page_size,
+                'page': 1,
+            },
+        }
+
+        try:
+            time.sleep(random.uniform(0.5, 1.5))
+            response = self.session.post(GRAPHQL_URL, json=payload, impersonate='chrome', timeout=15)
             response.raise_for_status()
-            try:
-                # Try to use response.text (should work if brotli is installed)
-                html = response.text
-                print(f"First 500 chars of response.text:\n{html[:500]}\n")
-            except Exception as e:
-                # Fallback: manual brotli decode
-                print(f"Error decoding response.text: {e}, trying manual brotli decode...")
-                html = brotli.decompress(response.content).decode('utf-8')
-                print(f"First 500 chars of manually decoded html:\n{html[:500]}\n")
+            data = response.json()
 
-            soup = BeautifulSoup(html, 'html.parser')
+            if 'errors' in data:
+                print(f"  GraphQL errors: {data['errors']}")
+                return []
 
-            # Find event listings
-            # Note: RA's exact selectors may change, adjust as needed
-            event_items = soup.find_all('div', attrs={'data-testid': 'event-upcoming-card'})
-            # Fallback: try different selectors
-            if not event_items:
-                event_items = soup.find_all('article')
+            listings = data.get('data', {}).get('eventListings', {}).get('data', [])
+            total = data.get('data', {}).get('eventListings', {}).get('totalResults', 0)
+            print(f"  Got {len(listings)} of {total} total events")
 
-            if not event_items:
-                print(f"⚠️  No events found for {city} (selector might need updating)")
-                return events
+            events = []
+            for listing in listings:
+                event = self._parse_event(listing, city_lower, country_code)
+                if event and event.get('title'):
+                    events.append(event)
 
-            for item in event_items[:50]:  # Limit to 50 events per city
-                try:
-                    event = self._parse_event(item, city, country)
-                    if event and event.get('title'):
-                        events.append(event)
-                except Exception as e:
-                    print(f"  Error parsing event: {e}")
-                    continue
+            print(f"  Parsed {len(events)} events")
+            return events
 
-            print(f"  Found {len(events)} events")
-            
-        except requests.RequestException as e:
-            print(f"  ✗ Network error: {e}")
         except Exception as e:
-            print(f"  ✗ Unexpected error: {e}")
-        
-        return events
-    
-    def _parse_event(self, item, city: str, country: str) -> Dict | None:
-        """Parse a single event from HTML"""
+            print(f"  Error fetching {city}: {e}")
+            return []
 
-        # date:
-        date_elem = item.find('span', attrs={'class': 'Text-sc-wks9sf-0 dhcUaC'})
-        event_date = None
-        try:
-            event_date = datetime.strptime(date_elem.text.strip(), '%a, %d %b').replace(year=datetime.now().year).date() if date_elem else None
-        except Exception:
-            pass
+    def _parse_event(self, listing: Dict, city: str, country: str) -> Dict | None:
+        """Parse a GraphQL event listing into our standard format."""
+        raw = listing.get('event', {})
+        if not raw:
+            return None
 
-        # TODO: If no structured date, try to parse from text
-        if not event_date:
-            date_text = item.get_text()
-            # Look for patterns like "15 Dec" or "December 15"
-            # This is a simplified parser, can be improved
-            pass
-
-        # Extract title
-        title_elem = item.find(['h3', 'h4', 'h2'])
-        if not title_elem:
-            # Try finding any link with text
-            title_elem = item.find('a', string=True)
-        
-        title = title_elem.get_text(strip=True) if title_elem else None
+        title = raw.get('title', '').strip()
         if not title or len(title) < 3:
             return None
-        
-        # Extract venue
-        venue_elem = item.find('a', attrs={'data-pw-test-id': 'event-venue-link'})
-        venue_href = venue_elem.get('href') if venue_elem else None
-        venue_url = None
-        if venue_href:
-            venue_url = f"{self.BASE_URL}{venue_href}" if venue_href.startswith('/') else venue_href
-        venue = venue_elem.get_text(strip=True) if venue_elem else None
 
-        
-        # Extract link and ID
-        link_elem = item.find('a', href=re.compile(r'/events/'))
-        event_url = None
+        # Parse dates
+        event_date = None
+        start_time = None
+        end_time_str = None
+        if raw.get('date'):
+            try:
+                event_date = datetime.fromisoformat(raw['date']).date()
+            except (ValueError, TypeError):
+                pass
+        if raw.get('startTime'):
+            try:
+                start_time = datetime.fromisoformat(raw['startTime']).strftime('%H:%M:%S')
+            except (ValueError, TypeError):
+                start_time = '23:00:00'
+        if raw.get('endTime'):
+            try:
+                end_time_str = raw['endTime']
+            except (ValueError, TypeError):
+                pass
+
+        # Calculate duration
+        duration_hours = 5.0
+        if raw.get('startTime') and raw.get('endTime'):
+            try:
+                start_dt = datetime.fromisoformat(raw['startTime'])
+                end_dt = datetime.fromisoformat(raw['endTime'])
+                diff = (end_dt - start_dt).total_seconds() / 3600
+                if diff > 0:
+                    duration_hours = round(diff, 1)
+            except (ValueError, TypeError):
+                pass
+
+        # Venue
+        venue = raw.get('venue', {}) or {}
+        venue_name = venue.get('name')
+        venue_address = venue.get('address')
+
+        # Image
+        images = raw.get('images', []) or []
+        image_url = images[0].get('filename') if images else None
+
+        # Event URL
+        content_url = raw.get('contentUrl', '')
+        event_url = f"{self.BASE_URL}{content_url}" if content_url else None
         source_id = None
-        if link_elem:
-            href = link_elem.get('href')
-            if href:
-                event_url = f"{self.BASE_URL}{href}" if href.startswith('/') else href
-                # Extract ID from URL like /events/12345-event-name
-                match = re.search(r'/events/(\d+)', href)
-                if match:
-                    source_id = f"ra_{match.group(1)}"
-        
-        # Extract price if available
-        price_min = None
-        price_text = item.find(string=re.compile(r'€|EUR|free', re.I))
-        if price_text:
-            text = price_text.lower()
-            if 'free' in text:
-                price_min = 0.0
-            else:
-                price_match = re.search(r'€?(\d+)', text)
-                if price_match:
-                    price_min = float(price_match.group(1))
-        
-        # Default if no price found
-        if price_min is None:
-            price_min = 15.0  # Typical RA event price
-        
-        # Auto-classify and generate vibe
-        category = "party"
-        tags = ["electronic", "nightlife"]
-        vibe = "Electronic music in an underground atmosphere"
-        
-        title_lower = title.lower()
-        if any(word in title_lower for word in ['techno', 'tech house']):
-            vibe = "Dark techno vibes, industrial energy"
-            tags.append("techno")
-        elif any(word in title_lower for word in ['house', 'deep house']):
-            vibe = "House music, uplifting beats"
-            tags.append("house")
-        elif any(word in title_lower for word in ['drum', 'bass', 'dnb', 'd&b']):
-            vibe = "High-energy drum and bass"
-            tags.append("drum-and-bass")
-        elif any(word in title_lower for word in ['ambient', 'experimental']):
-            vibe = "Experimental sounds, mind-expanding"
-            tags.append("experimental")
-        
+        if raw.get('id'):
+            source_id = f"ra_{raw['id']}"
+
+        # Blurb from pick
+        description = None
+        pick = raw.get('pick')
+        if pick and pick.get('blurb'):
+            description = pick['blurb']
+
+        # Classify
+        category, tags, vibe = self._classify(title)
+
         return {
             'title': title,
-            'description': None,
+            'description': description,
             'category': category,
             'tags': tags,
             'city': city.capitalize(),
             'country': country,
-            'venue_name': venue,
-            'venue_address': None,
-            'venue_url': venue_url if venue_elem else None,
+            'venue_name': venue_name,
+            'venue_address': venue_address,
             'event_date': event_date,
-            'start_time': "23:00:00",  # Default club time
-            'duration_hours': 5.0,
-            'price_min': price_min,
+            'start_time': start_time or '23:00:00',
+            'duration_hours': duration_hours,
+            'price_min': 15.0,
             'price_max': None,
             'currency': 'EUR',
-            'image_url': None,
+            'image_url': image_url,
             'booking_url': event_url,
             'source': 'resident_advisor',
             'source_id': source_id,
             'vibe': vibe,
-            'age_min': 18
+            'age_min': 18,
         }
+
+    def _classify(self, title: str) -> tuple:
+        title_lower = title.lower()
+        if any(w in title_lower for w in ['techno', 'tech house']):
+            return 'party', ['electronic', 'nightlife', 'techno'], 'Dark techno vibes, industrial energy'
+        if any(w in title_lower for w in ['house', 'deep house']):
+            return 'party', ['electronic', 'nightlife', 'house'], 'House music, uplifting beats'
+        if any(w in title_lower for w in ['drum', 'bass', 'dnb', 'd&b']):
+            return 'party', ['electronic', 'nightlife', 'drum-and-bass'], 'High-energy drum and bass'
+        if any(w in title_lower for w in ['ambient', 'experimental']):
+            return 'party', ['electronic', 'nightlife', 'experimental'], 'Experimental sounds, mind-expanding'
+        return 'party', ['electronic', 'nightlife'], 'Electronic music in an underground atmosphere'
 
 
 def test_scraper():
     """Test the scraper locally"""
     print("Testing Resident Advisor scraper...\n")
-    
+
     scraper = ResidentAdvisorScraper()
-    events = scraper.scrape_city("madrid", "ES")
-    
+    events = scraper.scrape_city("madrid")
+
     print(f"\n{'='*60}")
     print(f"Found {len(events)} events in Madrid")
     print(f"{'='*60}\n")
-    
-    for i, event in enumerate(events[:3], 1):
+
+    for i, event in enumerate(events[:5], 1):
         print(f"Event {i}:")
         print(f"  Title: {event['title']}")
         print(f"  Venue: {event['venue_name']}")
         print(f"  Date: {event['event_date']}")
-        print(f"  Price: €{event['price_min']}")
-        print(f"  Category: {event['category']}")
-        print(f"  Tags: {', '.join(event['tags'])}")
+        print(f"  Start: {event['start_time']}")
+        print(f"  Duration: {event['duration_hours']}h")
+        print(f"  Image: {event['image_url']}")
+        print(f"  URL: {event['booking_url']}")
         print(f"  Vibe: {event['vibe']}")
         print()
+
 
 if __name__ == "__main__":
     test_scraper()

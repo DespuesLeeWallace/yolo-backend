@@ -1,147 +1,164 @@
 """
-Songkick API Scraper
+Songkick Scraper
 
-Uses official Songkick API to fetch concert/live music events
-API Key required (free): https://www.songkick.com/developer
+Scrapes concert/live music events from Songkick (songkick.com).
+Uses web scraping with JSON-LD extraction since the official API is defunct.
+
+NOTE: Songkick does a server-side 301 redirect based on IP geolocation,
+so you always get events for the city closest to your server's IP.
+To scrape a specific city, you'd need a proxy in that city.
+The metro_area_id in the URL is ignored by Songkick's servers.
 """
 
 import requests
-from datetime import datetime, date
+from bs4 import BeautifulSoup
+from datetime import datetime
 from typing import List, Dict
+import re
+import json
 import time
+import random
+
+
+METRO_AREAS = {
+    'madrid': ('28843', 'spain-madrid', 'ES'),
+    'barcelona': ('28714', 'spain-barcelona', 'ES'),
+    'lisbon': ('31802', 'portugal-lisbon', 'PT'),
+    'berlin': ('28443', 'germany-berlin', 'DE'),
+    'amsterdam': ('31366', 'netherlands-amsterdam', 'NL'),
+}
+
 
 class SongkickScraper:
-    """Scraper for Songkick concert data using official API"""
-    
-    BASE_URL = "https://api.songkick.com/api/3.0"
-    
-    def __init__(self, api_key: str):
-        """
-        Initialize scraper with API key
-        
-        Args:
-            api_key: Songkick API key (get from https://www.songkick.com/developer)
-        """
-        if not api_key:
-            raise ValueError("Songkick API key is required")
-        
-        self.api_key = api_key
+    """Scraper for Songkick concert data via web scraping + JSON-LD."""
+
+    BASE_URL = "https://www.songkick.com"
+
+    def __init__(self):
         self.session = requests.Session()
-    
+        self.session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+        })
+
     def get_city_events(self, city_name: str, max_events: int = 50) -> List[Dict]:
         """
-        Get events for a city
-        
+        Get events for a city. Due to Songkick's geo-redirect, the actual
+        city returned depends on the server's IP location.
+
         Args:
-            city_name: City name (e.g., "Madrid", "Barcelona")
+            city_name: Requested city name (e.g., "Madrid")
             max_events: Maximum number of events to return
-            
+
         Returns:
             List of event dictionaries
         """
-        try:
-            # Step 1: Get metro area ID for the city
-            metro_id = self._get_metro_area_id(city_name)
-            if not metro_id:
-                print(f"  Could not find metro area for {city_name}")
-                return []
-            
-            # Step 2: Get events for that metro area
-            events = self._get_metro_area_events(metro_id, city_name, max_events)
-            
-            print(f"  Found {len(events)} events")
-            return events
-            
-        except Exception as e:
-            print(f"  Error fetching {city_name} events: {e}")
+        city_lower = city_name.lower()
+        metro_info = METRO_AREAS.get(city_lower)
+        if not metro_info:
+            print(f"  Unknown city: {city_name}")
             return []
-    
-    def _get_metro_area_id(self, city_name: str) -> int:
-        """Get Songkick metro area ID for a city"""
-        url = f"{self.BASE_URL}/search/locations.json"
-        params = {
-            "query": city_name,
-            "apikey": self.api_key
-        }
-        
-        response = self.session.get(url, params=params, timeout=10)
-        response.raise_for_status()
-        
-        data = response.json()
-        results = data.get('resultsPage', {}).get('results', {}).get('location', [])
-        
-        if results and len(results) > 0:
-            return results[0]['metroArea']['id']
-        
-        return None
-    
-    def _get_metro_area_events(self, metro_id: int, city_name: str, max_events: int) -> List[Dict]:
-        """Get events for a metro area"""
-        url = f"{self.BASE_URL}/metro_areas/{metro_id}/calendar.json"
-        params = {
-            "apikey": self.api_key,
-            "per_page": min(max_events, 50)  # API limit is 50 per page
-        }
-        
-        # Add small delay to respect rate limits
-        time.sleep(0.5)
-        
-        response = self.session.get(url, params=params, timeout=10)
-        response.raise_for_status()
-        
-        data = response.json()
-        raw_events = data.get('resultsPage', {}).get('results', {}).get('event', [])
-        
-        # Parse events
+
+        metro_id, metro_slug, country = metro_info
+        url = f"{self.BASE_URL}/metro-areas/{metro_id}-{metro_slug}"
+
+        print(f"  Fetching Songkick events from {url}")
+
+        try:
+            time.sleep(random.uniform(0.5, 1.5))
+            r = self.session.get(url, timeout=15)
+
+            # Check for geo-redirect
+            if r.url != url and metro_slug not in r.url:
+                actual_city = re.search(r'/metro-areas/\d+-\w+-(\w+)', r.url)
+                actual = actual_city.group(1) if actual_city else r.url
+                print(f"  WARNING: Songkick geo-redirected to {actual} (requested {city_name})")
+                print(f"  This is a Songkick limitation — results may not match requested city.")
+
+            r.raise_for_status()
+            events = self._extract_events(r.text, city_name, country)
+            print(f"  Found {len(events)} events")
+            return events[:max_events]
+
+        except Exception as e:
+            print(f"  Error fetching {city_name}: {e}")
+            return []
+
+    def _extract_events(self, html: str, city_name: str, country: str) -> List[Dict]:
+        """Extract events from JSON-LD blocks in the page."""
         events = []
-        for raw_event in raw_events:
+
+        for m in re.finditer(
+            r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>',
+            html, re.DOTALL
+        ):
             try:
-                event = self._parse_event(raw_event, city_name)
-                if event:
-                    events.append(event)
-            except Exception as e:
-                print(f"    Error parsing event: {e}")
+                data = json.loads(m.group(1))
+                items = data if isinstance(data, list) else [data]
+                for item in items:
+                    if item.get('@type') == 'MusicEvent':
+                        event = self._parse_event(item, city_name, country)
+                        if event:
+                            events.append(event)
+            except (json.JSONDecodeError, AttributeError):
                 continue
-        
+
         return events
-    
-    def _parse_event(self, raw_event: Dict, city_name: str) -> Dict:
-        """Parse a Songkick event into our format"""
-        
-        # Extract basic info
-        event_id = raw_event.get('id')
-        title = raw_event.get('displayName', 'Unknown Event')
-        event_type = raw_event.get('type', 'Concert')
-        
-        # Extract date and time
-        start_info = raw_event.get('start', {})
+
+    def _parse_event(self, raw: Dict, city_name: str, country: str) -> Dict | None:
+        """Parse a JSON-LD MusicEvent into our standard format."""
+        title = raw.get('name', '').strip()
+        # Clean "Artist @ Venue" format — keep just the artist part as title
+        if ' @ ' in title:
+            parts = title.split(' @ ', 1)
+            title = parts[0].strip()
+            venue_from_title = parts[1].strip()
+        else:
+            venue_from_title = None
+
+        if not title or len(title) < 2:
+            return None
+
+        # Location
+        location = raw.get('location', {})
+        venue_name = location.get('name') or venue_from_title
+        address = location.get('address', {})
+        actual_city = address.get('addressLocality', city_name)
+        actual_country = address.get('addressCountry', country)
+        venue_address = address.get('streetAddress')
+
+        # Dates
         event_date = None
         start_time = None
-        
-        if start_info.get('date'):
+        start_str = raw.get('startDate', '')
+        if start_str:
             try:
-                event_date = datetime.strptime(start_info['date'], '%Y-%m-%d').date()
-            except:
+                if 'T' in start_str:
+                    dt = datetime.fromisoformat(start_str)
+                    event_date = dt.date()
+                    start_time = dt.strftime('%H:%M:%S')
+                else:
+                    event_date = datetime.fromisoformat(start_str).date()
+            except (ValueError, TypeError):
                 pass
-        
-        if start_info.get('time'):
-            start_time = start_info['time']
-        else:
-            start_time = "20:00:00"  # Default concert time
-        
-        # Extract venue
-        venue_info = raw_event.get('venue', {})
-        venue_name = venue_info.get('displayName')
-        
-        # Extract location
-        location_info = raw_event.get('location', {})
-        city = location_info.get('city', city_name)
-        
-        # Extract performers/artists
-        performances = raw_event.get('performance', [])
-        artists = [p.get('artist', {}).get('displayName') for p in performances if p.get('artist')]
-        
-        # Build description
+
+        # Duration from start/end
+        duration_hours = 3.0
+        end_str = raw.get('endDate', '')
+        if start_str and end_str and 'T' in start_str and 'T' in end_str:
+            try:
+                start_dt = datetime.fromisoformat(start_str)
+                end_dt = datetime.fromisoformat(end_str)
+                diff = (end_dt - start_dt).total_seconds() / 3600
+                if 0 < diff < 48:
+                    duration_hours = round(diff, 1)
+            except (ValueError, TypeError):
+                pass
+
+        # Performers
+        performers = raw.get('performer', [])
+        artists = [p.get('name', '') for p in performers if p.get('name')]
         description = None
         if artists:
             if len(artists) == 1:
@@ -150,98 +167,89 @@ class SongkickScraper:
                 description = f"{artists[0]} and {artists[1]} live"
             else:
                 description = f"{artists[0]}, {artists[1]} and {len(artists)-2} more artists"
-        
-        # Determine category and vibe
-        category = "party"  # Most concerts fit party category
-        tags = ["live-music", "concert"]
-        vibe = "Live music energy"
-        
-        # Refine based on genre or type
-        title_lower = title.lower()
-        if any(word in title_lower for word in ['jazz', 'blues']):
-            category = "culture"
-            vibe = "Intimate jazz vibes"
-            tags.append("jazz")
-        elif any(word in title_lower for word in ['classical', 'orchestra', 'symphony']):
-            category = "culture"
-            vibe = "Classical elegance"
-            tags.append("classical")
-        elif any(word in title_lower for word in ['indie', 'alternative']):
-            category = "geeky"
-            vibe = "Indie music scene"
-            tags.append("indie")
-        elif any(word in title_lower for word in ['metal', 'rock']):
-            vibe = "High-energy rock concert"
-            tags.append("rock")
-        
-        # Estimate price (Songkick doesn't always provide this)
-        price_min = 20.0  # Typical concert price
-        
-        # Get country code
-        country_map = {
-            'madrid': 'ES', 'barcelona': 'ES',
-            'lisbon': 'PT',
-            'berlin': 'DE',
-            'amsterdam': 'NL',
-            'paris': 'FR',
-            'london': 'GB'
+
+        # Image
+        image_url = raw.get('image')
+
+        # Event URL
+        event_url = raw.get('url')
+        source_id = None
+        if event_url:
+            id_match = re.search(r'/(\d+)', event_url)
+            if id_match:
+                source_id = f"sk_{id_match.group(1)}"
+
+        # Classify
+        category, tags, vibe = self._classify(title, artists)
+
+        # Map country names to codes
+        country_code_map = {
+            'Spain': 'ES', 'Portugal': 'PT', 'Germany': 'DE',
+            'Netherlands': 'NL', 'France': 'FR', 'United Kingdom': 'GB',
+            'UK': 'GB', 'Italy': 'IT',
         }
-        country = country_map.get(city.lower(), 'EU')
-        
+        country_code = country_code_map.get(actual_country, actual_country)
+
         return {
             'title': title,
             'description': description,
             'category': category,
             'tags': tags,
-            'city': city,
-            'country': country,
+            'city': actual_city,
+            'country': country_code,
             'venue_name': venue_name,
-            'venue_address': None,
+            'venue_address': venue_address,
             'event_date': event_date,
-            'start_time': start_time,
-            'duration_hours': 3.0,  # Typical concert duration
-            'price_min': price_min,
+            'start_time': start_time or '20:00:00',
+            'duration_hours': duration_hours,
+            'price_min': 20.0,
             'price_max': None,
             'currency': 'EUR',
-            'image_url': None,
-            'booking_url': raw_event.get('uri'),
+            'image_url': image_url,
+            'booking_url': event_url,
             'source': 'songkick',
-            'source_id': f"sk_{event_id}",
+            'source_id': source_id,
             'vibe': vibe,
-            'age_min': 16  # Most concerts are all-ages or 16+
+            'age_min': 16,
         }
+
+    def _classify(self, title: str, artists: list) -> tuple:
+        text = f"{title} {' '.join(artists)}".lower()
+        if any(w in text for w in ['jazz', 'blues']):
+            return 'culture', ['live-music', 'concert', 'jazz'], 'Intimate jazz vibes'
+        if any(w in text for w in ['classical', 'orchestra', 'symphony']):
+            return 'culture', ['live-music', 'concert', 'classical'], 'Classical elegance'
+        if any(w in text for w in ['indie', 'alternative']):
+            return 'party', ['live-music', 'concert', 'indie'], 'Indie music scene'
+        if any(w in text for w in ['metal', 'rock', 'punk']):
+            return 'party', ['live-music', 'concert', 'rock'], 'High-energy rock concert'
+        if any(w in text for w in ['electronic', 'techno', 'dj']):
+            return 'party', ['live-music', 'electronic'], 'Electronic beats'
+        return 'party', ['live-music', 'concert'], 'Live music energy'
 
 
 def test_scraper():
     """Test the scraper locally"""
-    import os
-    from dotenv import load_dotenv
-    
-    load_dotenv()
-    
-    api_key = os.getenv('SONGKICK_API_KEY')
-    if not api_key:
-        print("Error: SONGKICK_API_KEY not set in environment")
-        print("Get your API key from: https://www.songkick.com/developer")
-        return
-    
     print("Testing Songkick scraper...\n")
-    
-    scraper = SongkickScraper(api_key)
+
+    scraper = SongkickScraper()
     events = scraper.get_city_events("Madrid")
-    
+
     print(f"\n{'='*60}")
-    print(f"Found {len(events)} events in Madrid")
+    print(f"Found {len(events)} events")
     print(f"{'='*60}\n")
-    
-    for i, event in enumerate(events[:3], 1):
+
+    for i, event in enumerate(events[:5], 1):
         print(f"Event {i}:")
         print(f"  Title: {event['title']}")
         print(f"  Venue: {event['venue_name']}")
+        print(f"  City: {event['city']}")
         print(f"  Date: {event['event_date']}")
         print(f"  Category: {event['category']}")
         print(f"  Vibe: {event['vibe']}")
+        print(f"  URL: {event['booking_url']}")
         print()
+
 
 if __name__ == "__main__":
     test_scraper()

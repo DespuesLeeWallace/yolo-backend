@@ -1,41 +1,36 @@
 name: Scrape Events
 
 on:
-  # Run every 6 hours
   schedule:
-    - cron: '23 3 * * *' # 3:23 AM UTC daily (random minute/hour)
-  
-  # Allow manual trigger
+    - cron: '23 3 * * *'  # 3:23 AM UTC daily
   workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: yolo-backend
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    
+
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      
-      - name: Set up UV
-        uses: astral-sh/setup-uv@v3
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v3
         with:
           enable-cache: true
-      
-      - name: Set up Python
-        run: uv python install 3.11
-      
-      - name: Install dependencies
-        run: uv sync
-      
+
+      - run: uv python install 3.11
+      - run: uv sync
+
       - name: Run scrapers
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          SONGKICK_API_KEY: ${{ secrets.SONGKICK_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
         run: |
-          # Add random delay (0-15 minutes) to avoid predictable patterns
           sleep $((RANDOM % 900))
           uv run python main.py
-      
+
       - name: Notify on failure
         if: failure()
         uses: actions/github-script@v7
