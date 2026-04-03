@@ -1,6 +1,8 @@
 name: Scrape Events
 
 on:
+  push:
+    branches: [master, main]
   schedule:
     - cron: '23 3 * * *'  # 3:23 AM UTC daily
   workflow_dispatch:
@@ -27,7 +29,9 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
         run: |
-          sleep $((RANDOM % 900))
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            sleep $((RANDOM % 900))
+          fi
           uv run python main.py
 
       - name: Notify on failure
