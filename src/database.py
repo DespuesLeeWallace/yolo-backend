@@ -13,7 +13,6 @@ from dotenv import load_dotenv
 
 load_dotenv('.env.local')
 
-
 class DatabaseManager:
     """Manages database operations via Supabase."""
 
