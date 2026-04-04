@@ -18,11 +18,28 @@ import random
 CITY_SLUGS = {
     'madrid': 'madrid',
     'barcelona': 'barcelona',
+    'copenhagen': 'copenhagen',
+    'paris': 'paris',
+    'london': 'london',
+    'prague': 'prague',
+    'milan': 'milano',
 }
+# Note: Vienna is not available on Xceed
 
 COUNTRY_CODES = {
     'madrid': 'ES',
     'barcelona': 'ES',
+    'copenhagen': 'DK',
+    'paris': 'FR',
+    'london': 'GB',
+    'prague': 'CZ',
+    'milan': 'IT',
+}
+
+CURRENCIES = {
+    'DK': 'DKK',
+    'GB': 'GBP',
+    'CZ': 'CZK',
 }
 
 
@@ -207,7 +224,7 @@ class XceedScraper:
             'duration_hours': duration_hours,
             'price_min': price_min,
             'price_max': None,
-            'currency': 'EUR',
+            'currency': CURRENCIES.get(country, 'EUR'),
             'image_url': image_url,
             'booking_url': event_url,
             'source': 'xceed',
@@ -323,7 +340,7 @@ class XceedScraper:
             'duration_hours': 5.0,
             'price_min': price_min,
             'price_max': None,
-            'currency': 'EUR',
+            'currency': CURRENCIES.get(country, 'EUR'),
             'image_url': image_url,
             'booking_url': url,
             'source': 'xceed',

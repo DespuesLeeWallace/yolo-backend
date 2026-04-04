@@ -20,6 +20,12 @@ AREA_IDS = {
     'lisbon': 53,
     'berlin': 34,
     'amsterdam': 29,
+    'copenhagen': 402,
+    'paris': 44,
+    'london': 13,
+    'prague': 451,
+    'milan': 347,
+    'vienna': 450,
 }
 
 COUNTRY_CODES = {
@@ -28,6 +34,18 @@ COUNTRY_CODES = {
     'lisbon': 'PT',
     'berlin': 'DE',
     'amsterdam': 'NL',
+    'copenhagen': 'DK',
+    'paris': 'FR',
+    'london': 'GB',
+    'prague': 'CZ',
+    'milan': 'IT',
+    'vienna': 'AT',
+}
+
+CURRENCIES = {
+    'DK': 'DKK',
+    'GB': 'GBP',
+    'CZ': 'CZK',
 }
 
 GRAPHQL_URL = "https://ra.co/graphql"
@@ -220,7 +238,7 @@ class ResidentAdvisorScraper:
             'duration_hours': duration_hours,
             'price_min': 15.0,
             'price_max': None,
-            'currency': 'EUR',
+            'currency': CURRENCIES.get(country, 'EUR'),
             'image_url': image_url,
             'booking_url': event_url,
             'source': 'resident_advisor',
